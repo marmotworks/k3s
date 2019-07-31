@@ -22,6 +22,13 @@ set -e
 #   - INSTALL_K3S_SKIP_DOWNLOAD
 #     If set to true will not download k3s hash or binary.
 #
+#   - INSTALL_K3S_SYMLINK
+#     If set to 'skip' will not create symlinks, 'force' will overwrite,
+#     default will symlink if command does not exist in path.
+#
+#   - INSTALL_K3S_SKIP_START
+#     If set to true will not start k3s service.
+#
 #   - INSTALL_K3S_VERSION
 #     Version of k3s to download from github. Will attempt to download the
 #     latest version if not specified.
@@ -29,6 +36,10 @@ set -e
 #   - INSTALL_K3S_BIN_DIR
 #     Directory to install k3s binary, links, and uninstall script to, or use
 #     /usr/local/bin as the default
+#
+#   - INSTALL_K3S_BIN_DIR_READ_ONLY
+#     If set to true will not write files to INSTALL_K3S_BIN_DIR, forces
+#     setting INSTALL_K3S_SKIP_DOWNLOAD=true
 #
 #   - INSTALL_K3S_SYSTEMD_DIR
 #     Directory to install systemd service and environment files to, or use
@@ -68,16 +79,46 @@ fatal()
     exit 1
 }
 
-# --- fatal if no systemd ---
-verify_systemd() {
-    if [ ! -d /run/systemd ]; then
-        fatal "Can not find systemd to use as a process supervisor for k3s"
+# --- fatal if no systemd or openrc ---
+verify_system() {
+    if [ -x /sbin/openrc-run ]; then
+        HAS_OPENRC=true
+        return
     fi
+    if [ -d /run/systemd ]; then
+        HAS_SYSTEMD=true
+        return
+    fi
+    fatal "Can not find systemd or openrc to use as a process supervisor for k3s"
+}
+
+# --- add quotes to command arguments ---
+quote() {
+    for arg in "$@"; do
+        printf "%s\n" "$arg" | sed "s/'/'\\\\''/g;1s/^/'/;\$s/\$/'/"
+    done
+}
+
+# --- add indentation and trailing slash to quoted args ---
+quote_indent() {
+    printf ' \\'"\n"
+    for arg in "$@"; do
+        printf "\t%s "'\\'"\n" "$(quote "$arg")"
+    done
+}
+
+# --- escape most punctuation characters, except quotes, forward slash, and space ---
+escape() {
+    printf "%s" "$@" | sed -e 's/\([][!#$%&()*;<=>?\_`{|}]\)/\\\1/g;'
+}
+
+# --- escape double quotes ---
+escape_dq() {
+    printf "%s" "$@" | sed -e 's/"/\\"/g'
 }
 
 # --- define needed environment variables ---
 setup_env() {
-
     # --- use command args if passed or create default ---
     case "$1" in
         # --- if we only have flags discover if command should be server or agent ---
@@ -90,28 +131,45 @@ setup_env() {
                 fi
                 CMD_K3S=agent
             fi
-            CMD_K3S_EXEC="${CMD_K3S} $@"
         ;;
         # --- command is provided ---
         (*)
             CMD_K3S="$1"
-            CMD_K3S_EXEC="$@"
+            shift
         ;;
     esac
-    CMD_K3S_EXEC=$(trim() { echo $@; } && trim ${CMD_K3S_EXEC})
+    CMD_K3S_EXEC="${CMD_K3S}$(quote_indent "$@")"
 
     # --- use systemd name if defined or create default ---
     if [ -n "${INSTALL_K3S_NAME}" ]; then
-        SYSTEMD_NAME=k3s-${INSTALL_K3S_NAME}
+        SYSTEM_NAME=k3s-${INSTALL_K3S_NAME}
     else
         if [ "${CMD_K3S}" = "server" ]; then
-            SYSTEMD_NAME=k3s
+            SYSTEM_NAME=k3s
         else
-            SYSTEMD_NAME=k3s-${CMD_K3S}
+            SYSTEM_NAME=k3s-${CMD_K3S}
         fi
     fi
-    SERVICE_K3S=${SYSTEMD_NAME}.service
-    UNINSTALL_K3S_SH=${SYSTEMD_NAME}-uninstall.sh
+
+    # --- check for invalid characters in system name ---
+    valid_chars=$(printf "%s" "${SYSTEM_NAME}" | sed -e 's/[][!#$%&()*;<=>?\_`{|}/[:space:]]/^/g;' )
+    if [ "${SYSTEM_NAME}" != "${valid_chars}"  ]; then
+        invalid_chars=$(printf "%s" "${valid_chars}" | sed -e 's/[^^]/ /g')
+        fatal "Invalid characters for system name:
+            ${SYSTEM_NAME}
+            ${invalid_chars}"
+    fi
+
+    # --- set related files from system name ---
+    SERVICE_K3S=${SYSTEM_NAME}.service
+    UNINSTALL_K3S_SH=${SYSTEM_NAME}-uninstall.sh
+    KILLALL_K3S_SH=k3s-killall.sh
+
+    # --- use sudo if we are not already root ---
+    SUDO=sudo
+    if [ `id -u` = 0 ]; then
+        SUDO=
+    fi
 
     # --- use systemd type if defined or create default ---
     if [ -n "${INSTALL_K3S_TYPE}" ]; then
@@ -138,10 +196,22 @@ setup_env() {
         SYSTEMD_DIR="/etc/systemd/system"
     fi
 
-    # --- use sudo if we are not already root ---
-    SUDO=sudo
-    if [ `id -u` = 0 ]; then
-        SUDO=
+    # --- use service or environment location depending on systemd/openrc ---
+    if [ "${HAS_SYSTEMD}" = "true" ]; then
+        FILE_K3S_SERVICE=${SYSTEMD_DIR}/${SERVICE_K3S}
+        FILE_K3S_ENV=${SYSTEMD_DIR}/${SERVICE_K3S}.env
+    elif [ "${HAS_OPENRC}" = "true" ]; then
+        $SUDO mkdir -p /etc/rancher/k3s
+        FILE_K3S_SERVICE=/etc/init.d/${SYSTEM_NAME}
+        FILE_K3S_ENV=/etc/rancher/k3s/${SYSTEM_NAME}.env
+    fi
+
+    # --- get hash of config & exec for currently installed k3s ---
+    PRE_INSTALL_HASHES=`get_installed_hashes`
+
+    # --- if bin directory is read only skip download ---
+    if [ "${INSTALL_K3S_BIN_DIR_READ_ONLY}" = "true" ]; then
+        INSTALL_K3S_SKIP_DOWNLOAD=true
     fi
 }
 
@@ -161,7 +231,9 @@ verify_k3s_is_executable() {
 
 # --- set arch and suffix, fatal if architecture not supported ---
 setup_verify_arch() {
-    ARCH=`uname -m`
+    if [ -z "$ARCH" ]; then
+        ARCH=`uname -m`
+    fi
     case $ARCH in
         amd64)
             ARCH=amd64
@@ -300,66 +372,123 @@ download_and_verify() {
 
 # --- add additional utility links ---
 create_symlinks() {
-    if [ ! -e ${BIN_DIR}/kubectl ]; then
-        info "Creating ${BIN_DIR}/kubectl symlink to k3s"
-        $SUDO ln -s k3s ${BIN_DIR}/kubectl
-    fi
+    [ "${INSTALL_K3S_BIN_DIR_READ_ONLY}" = "true" ] && return
+    [ "${INSTALL_K3S_SYMLINK}" = "skip" ] && return
 
-    if [ ! -e ${BIN_DIR}/crictl ]; then
-        info "Creating ${BIN_DIR}/crictl symlink to k3s"
-        $SUDO ln -s k3s ${BIN_DIR}/crictl
+    for cmd in kubectl crictl ctr; do
+        if [ ! -e ${BIN_DIR}/${cmd} ] || [ "${INSTALL_K3S_SYMLINK}" = "force" ]; then
+            which_cmd=$(which ${cmd} || true)
+            if [ -z "${which_cmd}" ] || [ "${INSTALL_K3S_SYMLINK}" = "force" ]; then
+                info "Creating ${BIN_DIR}/${cmd} symlink to k3s"
+                $SUDO ln -sf k3s ${BIN_DIR}/${cmd}
+            else
+                info "Skipping ${BIN_DIR}/${cmd} symlink to k3s, command exists in PATH at ${which_cmd}"
+            fi
+        else
+            info "Skipping ${BIN_DIR}/${cmd} symlink to k3s, already exists"
+        fi
+    done
+}
+
+# --- create killall script ---
+create_killall() {
+    [ "${INSTALL_K3S_BIN_DIR_READ_ONLY}" = "true" ] && return
+    info "Creating killall script ${BIN_DIR}/${KILLALL_K3S_SH}"
+    $SUDO tee ${BIN_DIR}/${KILLALL_K3S_SH} >/dev/null << \EOF
+#!/bin/sh
+set -x
+[ `id -u` = 0 ] || exec sudo $0 $@
+
+for bin in /var/lib/rancher/k3s/data/**/bin/; do
+    [ -d $bin ] && export PATH=$bin:$PATH
+done
+
+for service in /etc/systemd/system/k3s*.service; do
+    [ -s $service ] && systemctl stop $(basename $service)
+done
+
+for service in /etc/init.d/k3s*; do
+    [ -x $service ] && $service stop
+done
+
+pstree() {
+    for pid in $@; do
+        echo $pid
+        pstree $(ps -o ppid= -o pid= | awk "\$1==$pid {print \$2}")
+    done
+}
+
+killtree() {
+    [ $# -ne 0 ] && kill $(set +x; pstree $@; set -x)
+}
+
+killtree $(lsof | sed -e 's/^[^0-9]*//g; s/  */\t/g' | grep -w 'k3s/data/[^/]*/bin/containerd-shim' | cut -f1 | sort -n -u)
+
+do_unmount() {
+    MOUNTS=`cat /proc/self/mounts | awk '{print $2}' | grep "^$1" | sort -r`
+    if [ -n "${MOUNTS}" ]; then
+        umount ${MOUNTS}
     fi
+}
+
+do_unmount '/run/k3s'
+do_unmount '/var/lib/rancher/k3s'
+
+nets=$(ip link show | grep 'master cni0' | awk -F': ' '{print $2}' | sed -e 's|@.*||')
+for iface in $nets; do
+    ip link delete $iface;
+done
+ip link delete cni0
+ip link delete flannel.1
+rm -rf /var/lib/cni/
+EOF
+    $SUDO chmod 755 ${BIN_DIR}/${KILLALL_K3S_SH}
+    $SUDO chown root:root ${BIN_DIR}/${KILLALL_K3S_SH}
 }
 
 # --- create uninstall script ---
 create_uninstall() {
+    [ "${INSTALL_K3S_BIN_DIR_READ_ONLY}" = "true" ] && return
     info "Creating uninstall script ${BIN_DIR}/${UNINSTALL_K3S_SH}"
     $SUDO tee ${BIN_DIR}/${UNINSTALL_K3S_SH} >/dev/null << EOF
 #!/bin/sh
 set -x
-systemctl kill ${SYSTEMD_NAME}
-systemctl disable ${SYSTEMD_NAME}
-systemctl reset-failed ${SYSTEMD_NAME}
-systemctl daemon-reload
-rm -f ${SYSTEMD_DIR}/${SERVICE_K3S}
-rm -f ${SYSTEMD_DIR}/${SERVICE_K3S}.env
+[ \`id -u\` = 0 ] || exec sudo \$0 \$@
+
+${BIN_DIR}/${KILLALL_K3S_SH}
+
+if which systemctl; then
+    systemctl disable ${SYSTEM_NAME}
+    systemctl reset-failed ${SYSTEM_NAME}
+    systemctl daemon-reload
+fi
+if which rc-update; then
+    rc-update delete ${SYSTEM_NAME} default
+fi
+
+rm -f ${FILE_K3S_SERVICE}
+rm -f ${FILE_K3S_ENV}
 
 remove_uninstall() {
     rm -f ${BIN_DIR}/${UNINSTALL_K3S_SH}
 }
 trap remove_uninstall EXIT
 
-if ls ${SYSTEMD_DIR}/k3s*.service >/dev/null 2>&1; then
+if (ls ${SYSTEMD_DIR}/k3s*.service || ls /etc/init.d/k3s*) >/dev/null 2>&1; then
     set +x; echo "Additional k3s services installed, skipping uninstall of k3s"; set -x
     exit
 fi
 
-do_unmount() {
-    MOUNTS=\`cat /proc/self/mounts | awk '{print \$2}' | grep "^\$1"\`
-    if [ -n "\${MOUNTS}" ]; then
-        umount \${MOUNTS}
+for cmd in kubectl crictl ctr; do
+    if [ -L ${BIN_DIR}/\$cmd ]; then
+        rm -f ${BIN_DIR}/\$cmd
     fi
-}
-do_unmount '/run/k3s'
-do_unmount '/var/lib/rancher/k3s'
-
-nets=\$(ip link show master cni0 | grep cni0 | awk -F': ' '{print \$2}' | sed -e 's|@.*||')
-for iface in \$nets; do
-    ip link delete \$iface;
 done
-ip link delete cni0
-ip link delete flannel.1
-
-if [ -L ${BIN_DIR}/kubectl ]; then
-    rm -f ${BIN_DIR}/kubectl
-fi
-if [ -L ${BIN_DIR}/crictl ]; then
-    rm -f ${BIN_DIR}/crictl
-fi
 
 rm -rf /etc/rancher/k3s
 rm -rf /var/lib/rancher/k3s
 rm -f ${BIN_DIR}/k3s
+rm -f ${BIN_DIR}/${KILLALL_K3S_SH}
 EOF
     $SUDO chmod 755 ${BIN_DIR}/${UNINSTALL_K3S_SH}
     $SUDO chown root:root ${BIN_DIR}/${UNINSTALL_K3S_SH}
@@ -369,33 +498,35 @@ EOF
 systemd_disable() {
     $SUDO rm -f /etc/systemd/system/${SERVICE_K3S} || true
     $SUDO rm -f /etc/systemd/system/${SERVICE_K3S}.env || true
-    $SUDO systemctl disable ${SYSTEMD_NAME} >/dev/null 2>&1 || true
+    $SUDO systemctl disable ${SYSTEM_NAME} >/dev/null 2>&1 || true
 }
 
 # --- capture current env and create file containing k3s_ variables ---
 create_env_file() {
-    info "systemd: Creating environment file ${SYSTEMD_DIR}/${SERVICE_K3S}.env"
+    info "env: Creating environment file ${FILE_K3S_ENV}"
     UMASK=`umask`
     umask 0377
-    env | grep '^K3S_' | $SUDO tee ${SYSTEMD_DIR}/${SERVICE_K3S}.env >/dev/null
+    env | grep '^K3S_' | $SUDO tee ${FILE_K3S_ENV} >/dev/null
     umask $UMASK
 }
 
-# --- write service file ---
-create_service_file() {
-    info "systemd: Creating service file ${SYSTEMD_DIR}/${SERVICE_K3S}"
-    $SUDO tee ${SYSTEMD_DIR}/${SERVICE_K3S} >/dev/null << EOF
+# --- write systemd service file ---
+create_systemd_service_file() {
+    info "systemd: Creating service file ${FILE_K3S_SERVICE}"
+    $SUDO tee ${FILE_K3S_SERVICE} >/dev/null << EOF
 [Unit]
 Description=Lightweight Kubernetes
 Documentation=https://k3s.io
-After=network.target
+After=network-online.target
 
 [Service]
 Type=${SYSTEMD_TYPE}
-EnvironmentFile=${SYSTEMD_DIR}/${SERVICE_K3S}.env
+EnvironmentFile=${FILE_K3S_ENV}
 ExecStartPre=-/sbin/modprobe br_netfilter
 ExecStartPre=-/sbin/modprobe overlay
-ExecStart=${BIN_DIR}/k3s ${CMD_K3S_EXEC}
+ExecStart=${BIN_DIR}/k3s \\
+    ${CMD_K3S_EXEC}
+
 KillMode=process
 Delegate=yes
 LimitNOFILE=infinity
@@ -403,31 +534,122 @@ LimitNPROC=infinity
 LimitCORE=infinity
 TasksMax=infinity
 TimeoutStartSec=0
+Restart=always
+RestartSec=5s
 
 [Install]
 WantedBy=multi-user.target
 EOF
 }
 
-# --- enable and start systemd service ---
-systemd_enable_and_start() {
-    info "systemd: Enabling ${SYSTEMD_NAME} unit"
-    $SUDO systemctl enable ${SYSTEMD_DIR}/${SERVICE_K3S} >/dev/null
-    $SUDO systemctl daemon-reload >/dev/null
+# --- write openrc service file ---
+create_openrc_service_file() {
+    LOG_FILE=/var/log/${SYSTEM_NAME}.log
 
-    info "systemd: Starting ${SYSTEMD_NAME}"
-    $SUDO systemctl restart ${SYSTEMD_NAME}
+    info "openrc: Creating service file ${FILE_K3S_SERVICE}"
+    $SUDO tee ${FILE_K3S_SERVICE} >/dev/null << EOF
+#!/sbin/openrc-run
+
+depend() {
+    after net-online
+    need net
 }
+
+start_pre() {
+    rm -f /tmp/k3s.*
+}
+
+supervisor=supervise-daemon
+name="${SYSTEM_NAME}"
+command="${BIN_DIR}/k3s"
+command_args="$(escape_dq "${CMD_K3S_EXEC}")
+    >>${LOG_FILE} 2>&1"
+
+pidfile="/var/run/${SYSTEM_NAME}.pid"
+respawn_delay=5
+
+set -o allexport
+if [ -f /etc/environment ]; then source /etc/environment; fi
+if [ -f ${FILE_K3S_ENV} ]; then source ${FILE_K3S_ENV}; fi
+set +o allexport
+EOF
+    $SUDO chmod 0755 ${FILE_K3S_SERVICE}
+
+    $SUDO tee /etc/logrotate.d/${SYSTEM_NAME} >/dev/null << EOF
+${LOG_FILE} {
+	missingok
+	notifempty
+	copytruncate
+}
+EOF
+}
+
+# --- write systemd or openrc service file ---
+create_service_file() {
+    [ "${HAS_SYSTEMD}" = "true" ] && create_systemd_service_file
+    [ "${HAS_OPENRC}" = "true" ] && create_openrc_service_file
+    return 0
+}
+
+# --- get hashes of the current k3s bin and service files
+get_installed_hashes() {
+    $SUDO sha256sum ${BIN_DIR}/k3s ${FILE_K3S_SERVICE} ${FILE_K3S_ENV} 2>&1 || true
+}
+
+# --- enable and start systemd service ---
+systemd_enable() {
+    info "systemd: Enabling ${SYSTEM_NAME} unit"
+    $SUDO systemctl enable ${FILE_K3S_SERVICE} >/dev/null
+    $SUDO systemctl daemon-reload >/dev/null
+}
+
+systemd_start() {
+    info "systemd: Starting ${SYSTEM_NAME}"
+    $SUDO systemctl restart ${SYSTEM_NAME}
+}
+
+# --- enable and start openrc service ---
+openrc_enable() {
+    info "openrc: Enabling ${SYSTEM_NAME} service for default runlevel"
+    $SUDO rc-update add ${SYSTEM_NAME} default >/dev/null
+}
+
+openrc_start() {
+    info "openrc: Starting ${SYSTEM_NAME}"
+    $SUDO ${FILE_K3S_SERVICE} restart
+}
+
+# --- startup systemd or openrc service ---
+service_enable_and_start() {
+    [ "${HAS_SYSTEMD}" = "true" ] && systemd_enable
+    [ "${HAS_OPENRC}" = "true" ] && openrc_enable
+
+    [ "${INSTALL_K3S_SKIP_START}" = "true" ] && return
+
+    POST_INSTALL_HASHES=`get_installed_hashes`
+    if [ "${PRE_INSTALL_HASHES}" = "${POST_INSTALL_HASHES}" ]; then
+        info "No change detected so skipping service start"
+        return
+    fi
+
+    [ "${HAS_SYSTEMD}" = "true" ] && systemd_start
+    [ "${HAS_OPENRC}" = "true" ] && openrc_start
+    return 0
+}
+
+# --- re-evaluate args to include env command ---
+eval set -- $(escape "${INSTALL_K3S_EXEC}") $(quote "$@")
 
 # --- run the install process --
 {
-    verify_systemd
-    setup_env ${INSTALL_K3S_EXEC} $@
+    verify_system
+    setup_env "$@"
     download_and_verify
     create_symlinks
+    create_killall
     create_uninstall
     systemd_disable
     create_env_file
     create_service_file
-    systemd_enable_and_start
+    service_enable_and_start
 }

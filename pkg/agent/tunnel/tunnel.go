@@ -8,14 +8,21 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"reflect"
 	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/rancher/k3s/pkg/daemons/config"
-	"github.com/rancher/norman/pkg/remotedialer"
+	"github.com/rancher/remotedialer"
 	"github.com/sirupsen/logrus"
+	v1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/fields"
+	watchtypes "k8s.io/apimachinery/pkg/watch"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/client-go/transport"
 )
 
 var (
@@ -25,8 +32,29 @@ var (
 	}
 )
 
-func Setup(config *config.Node) error {
-	restConfig, err := clientcmd.BuildConfigFromFlags("", config.AgentConfig.KubeConfig)
+func getAddresses(endpoint *v1.Endpoints) []string {
+	serverAddresses := []string{}
+	if endpoint == nil {
+		return serverAddresses
+	}
+	for _, subset := range endpoint.Subsets {
+		var port string
+		if len(subset.Ports) > 0 {
+			port = fmt.Sprint(subset.Ports[0].Port)
+		}
+		for _, address := range subset.Addresses {
+			serverAddress := address.IP
+			if port != "" {
+				serverAddress += ":" + port
+			}
+			serverAddresses = append(serverAddresses, serverAddress)
+		}
+	}
+	return serverAddresses
+}
+
+func Setup(ctx context.Context, config *config.Node) error {
+	restConfig, err := clientcmd.BuildConfigFromFlags("", config.AgentConfig.KubeConfigNode)
 	if err != nil {
 		return err
 	}
@@ -36,7 +64,102 @@ func Setup(config *config.Node) error {
 		return err
 	}
 
-	wsURL := fmt.Sprintf("wss://%s/v1-k3s/connect", config.ServerAddress)
+	client, err := kubernetes.NewForConfig(restConfig)
+	if err != nil {
+		return err
+	}
+
+	addresses := []string{config.ServerAddress}
+
+	endpoint, _ := client.CoreV1().Endpoints("default").Get("kubernetes", metav1.GetOptions{})
+	if endpoint != nil {
+		addresses = getAddresses(endpoint)
+	}
+
+	disconnect := map[string]context.CancelFunc{}
+
+	wg := &sync.WaitGroup{}
+	for _, address := range addresses {
+		if _, ok := disconnect[address]; !ok {
+			disconnect[address] = connect(ctx, wg, address, config, transportConfig)
+		}
+	}
+
+	go func() {
+	connect:
+		for {
+			time.Sleep(5 * time.Second)
+			watch, err := client.CoreV1().Endpoints("default").Watch(metav1.ListOptions{
+				FieldSelector:   fields.Set{"metadata.name": "kubernetes"}.String(),
+				ResourceVersion: "0",
+			})
+			if err != nil {
+				logrus.Errorf("Unable to watch for tunnel endpoints: %v", err)
+				continue connect
+			}
+		watching:
+			for {
+				select {
+				case ev, ok := <-watch.ResultChan():
+					if !ok || ev.Type == watchtypes.Error {
+						if ok {
+							logrus.Errorf("Tunnel endpoint watch channel closed: %v", ev)
+						}
+						watch.Stop()
+						continue connect
+					}
+					endpoint, ok := ev.Object.(*v1.Endpoints)
+					if !ok {
+						logrus.Errorf("Tunnel could not case event object to endpoint: %v", ev)
+						continue watching
+					}
+
+					newAddresses := getAddresses(endpoint)
+					if reflect.DeepEqual(newAddresses, addresses) {
+						continue watching
+					}
+					addresses = newAddresses
+					logrus.Infof("Tunnel endpoint watch event: %v", addresses)
+
+					validEndpoint := map[string]bool{}
+
+					for _, address := range addresses {
+						validEndpoint[address] = true
+						if _, ok := disconnect[address]; !ok {
+							disconnect[address] = connect(ctx, nil, address, config, transportConfig)
+						}
+					}
+
+					for address, cancel := range disconnect {
+						if !validEndpoint[address] {
+							cancel()
+							delete(disconnect, address)
+							logrus.Infof("Stopped tunnel to %s", address)
+						}
+					}
+				}
+			}
+		}
+	}()
+
+	wait := make(chan int, 1)
+	go func() {
+		wg.Wait()
+		wait <- 0
+	}()
+
+	select {
+	case <-ctx.Done():
+		logrus.Error("tunnel context canceled while waiting for connection")
+		return ctx.Err()
+	case <-wait:
+	}
+
+	return nil
+}
+
+func connect(rootCtx context.Context, waitGroup *sync.WaitGroup, address string, config *config.Node, transportConfig *transport.Config) context.CancelFunc {
+	wsURL := fmt.Sprintf("wss://%s/v1-k3s/connect", address)
 	headers := map[string][]string{
 		"X-K3s-NodeName": {config.AgentConfig.NodeName},
 	}
@@ -57,23 +180,32 @@ func Setup(config *config.Node) error {
 	}
 
 	once := sync.Once{}
-	wg := sync.WaitGroup{}
-	wg.Add(1)
+	if waitGroup != nil {
+		waitGroup.Add(1)
+	}
+
+	ctx, cancel := context.WithCancel(rootCtx)
 
 	go func() {
 		for {
-			logrus.Infof("Connecting to %s", wsURL)
-			remotedialer.ClientConnect(wsURL, http.Header(headers), ws, func(proto, address string) bool {
+			remotedialer.ClientConnect(ctx, wsURL, http.Header(headers), ws, func(proto, address string) bool {
 				host, port, err := net.SplitHostPort(address)
 				return err == nil && proto == "tcp" && ports[port] && host == "127.0.0.1"
 			}, func(_ context.Context) error {
-				once.Do(wg.Done)
+				if waitGroup != nil {
+					once.Do(waitGroup.Done)
+				}
 				return nil
 			})
-			time.Sleep(5 * time.Second)
+
+			if ctx.Err() != nil {
+				if waitGroup != nil {
+					once.Do(waitGroup.Done)
+				}
+				return
+			}
 		}
 	}()
 
-	wg.Wait()
-	return nil
+	return cancel
 }

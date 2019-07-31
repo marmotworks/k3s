@@ -17,12 +17,21 @@ type Server struct {
 	DisableAgent        bool
 	KubeConfigOutput    string
 	KubeConfigMode      string
-	KnownIPs            cli.StringSlice
+	TLSSan              cli.StringSlice
 	BindAddress         string
 	ExtraAPIArgs        cli.StringSlice
 	ExtraSchedulerArgs  cli.StringSlice
 	ExtraControllerArgs cli.StringSlice
 	Rootless            bool
+	BootstrapType       string
+	StorageBackend      string
+	StorageEndpoint     string
+	StorageCAFile       string
+	StorageCertFile     string
+	StorageKeyFile      string
+	AdvertiseIP         string
+	AdvertisePort       int
+	DisableScheduler    bool
 }
 
 var ServerConfig Server
@@ -115,7 +124,7 @@ func NewServerCommand(action func(*cli.Context) error) cli.Command {
 			cli.StringSliceFlag{
 				Name:  "tls-san",
 				Usage: "Add additional hostname or IP as a Subject Alternative Name in the TLS cert",
-				Value: &ServerConfig.KnownIPs,
+				Value: &ServerConfig.TLSSan,
 			},
 			cli.StringSliceFlag{
 				Name:  "kube-apiserver-arg",
@@ -137,15 +146,69 @@ func NewServerCommand(action func(*cli.Context) error) cli.Command {
 				Usage:       "(experimental) Run rootless",
 				Destination: &ServerConfig.Rootless,
 			},
+			cli.StringFlag{
+				Name:        "bootstrap",
+				Usage:       "(experimental) Specify data bootstrap behavior (one of: none, read, write, or full), etcd3 only",
+				Destination: &ServerConfig.BootstrapType,
+			},
+			cli.StringFlag{
+				Name:        "storage-backend",
+				Usage:       "Specify storage type etcd3 or kvsql",
+				Destination: &ServerConfig.StorageBackend,
+				EnvVar:      "K3S_STORAGE_BACKEND",
+			},
+			cli.StringFlag{
+				Name:        "storage-endpoint",
+				Usage:       "Specify etcd, Mysql, Postgres, or Sqlite (default) data source name",
+				Destination: &ServerConfig.StorageEndpoint,
+				EnvVar:      "K3S_STORAGE_ENDPOINT",
+			},
+			cli.StringFlag{
+				Name:        "storage-cafile",
+				Usage:       "SSL Certificate Authority file used to secure storage backend communication",
+				Destination: &ServerConfig.StorageCAFile,
+				EnvVar:      "K3S_STORAGE_CAFILE",
+			},
+			cli.StringFlag{
+				Name:        "storage-certfile",
+				Usage:       "SSL certification file used to secure storage backend communication",
+				Destination: &ServerConfig.StorageCertFile,
+				EnvVar:      "K3S_STORAGE_CERTFILE",
+			},
+			cli.StringFlag{
+				Name:        "storage-keyfile",
+				Usage:       "SSL key file used to secure storage backend communication",
+				Destination: &ServerConfig.StorageKeyFile,
+				EnvVar:      "K3S_STORAGE_KEYFILE",
+			},
+			cli.StringFlag{
+				Name:        "advertise-address",
+				Usage:       "IP address that apiserver uses to advertise to members of the cluster",
+				Destination: &ServerConfig.AdvertiseIP,
+			},
+			cli.IntFlag{
+				Name:        "advertise-port",
+				Usage:       "Port that apiserver uses to advertise to members of the cluster",
+				Value:       0,
+				Destination: &ServerConfig.AdvertisePort,
+			},
+			cli.BoolFlag{
+				Name:        "disable-scheduler",
+				Usage:       "Disable Kubernetes default scheduler",
+				Destination: &ServerConfig.DisableScheduler,
+			},
 			NodeIPFlag,
 			NodeNameFlag,
 			DockerFlag,
 			FlannelFlag,
 			FlannelIfaceFlag,
 			CRIEndpointFlag,
+			PauseImageFlag,
 			ResolvConfFlag,
 			ExtraKubeletArgs,
 			ExtraKubeProxyArgs,
+			NodeLabels,
+			NodeTaints,
 		},
 	}
 }

@@ -8,6 +8,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
+
+	"github.com/rancher/k3s/pkg/netutil"
 
 	systemd "github.com/coreos/go-systemd/daemon"
 	"github.com/docker/docker/pkg/reexec"
@@ -18,18 +21,21 @@ import (
 	"github.com/rancher/k3s/pkg/datadir"
 	"github.com/rancher/k3s/pkg/rootless"
 	"github.com/rancher/k3s/pkg/server"
-	"github.com/rancher/norman/signal"
+	"github.com/rancher/wrangler/pkg/signals"
 	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli"
 	"k8s.io/apimachinery/pkg/util/net"
+	"k8s.io/kubernetes/pkg/master"
 	"k8s.io/kubernetes/pkg/volume/csi"
 
-	_ "github.com/mattn/go-sqlite3" // ensure we have sqlite
+	_ "github.com/go-sql-driver/mysql" // ensure we have mysql
+	_ "github.com/lib/pq"              // ensure we have postgres
+	_ "github.com/mattn/go-sqlite3"    // ensure we have sqlite
 )
 
 func setupLogging(app *cli.Context) {
 	if !app.GlobalBool("debug") {
-		flag.Set("stderrthreshold", "3")
+		flag.Set("stderrthreshold", "WARNING")
 		flag.Set("alsologtostderr", "false")
 		flag.Set("logtostderr", "false")
 	}
@@ -67,6 +73,10 @@ func run(app *cli.Context, cfg *cmds.Server) error {
 		return runWithLogging(app, cfg)
 	}
 
+	if err := checkUnixTimestamp(); err != nil {
+		return err
+	}
+
 	setupLogging(app)
 
 	if !cfg.DisableAgent && os.Getuid() != 0 && !cfg.Rootless {
@@ -92,15 +102,43 @@ func run(app *cli.Context, cfg *cmds.Server) error {
 	serverConfig.ControlConfig.DataDir = cfg.DataDir
 	serverConfig.ControlConfig.KubeConfigOutput = cfg.KubeConfigOutput
 	serverConfig.ControlConfig.KubeConfigMode = cfg.KubeConfigMode
+	serverConfig.ControlConfig.NoScheduler = cfg.DisableScheduler
 	serverConfig.Rootless = cfg.Rootless
 	serverConfig.TLSConfig.HTTPSPort = cfg.HTTPSPort
 	serverConfig.TLSConfig.HTTPPort = cfg.HTTPPort
-	serverConfig.TLSConfig.KnownIPs = knownIPs(cfg.KnownIPs)
+	for _, san := range knownIPs(cfg.TLSSan) {
+		addr := net2.ParseIP(san)
+		if addr != nil {
+			serverConfig.TLSConfig.KnownIPs = append(serverConfig.TLSConfig.KnownIPs, san)
+		} else {
+			serverConfig.TLSConfig.Domains = append(serverConfig.TLSConfig.Domains, san)
+		}
+	}
 	serverConfig.TLSConfig.BindAddress = cfg.BindAddress
+	serverConfig.ControlConfig.HTTPSPort = cfg.HTTPSPort
 	serverConfig.ControlConfig.ExtraAPIArgs = cfg.ExtraAPIArgs
 	serverConfig.ControlConfig.ExtraControllerArgs = cfg.ExtraControllerArgs
 	serverConfig.ControlConfig.ExtraSchedulerAPIArgs = cfg.ExtraSchedulerArgs
 	serverConfig.ControlConfig.ClusterDomain = cfg.ClusterDomain
+	serverConfig.ControlConfig.StorageEndpoint = cfg.StorageEndpoint
+	serverConfig.ControlConfig.StorageBackend = cfg.StorageBackend
+	serverConfig.ControlConfig.StorageCAFile = cfg.StorageCAFile
+	serverConfig.ControlConfig.StorageCertFile = cfg.StorageCertFile
+	serverConfig.ControlConfig.StorageKeyFile = cfg.StorageKeyFile
+	serverConfig.ControlConfig.AdvertiseIP = cfg.AdvertiseIP
+	serverConfig.ControlConfig.AdvertisePort = cfg.AdvertisePort
+	serverConfig.ControlConfig.BootstrapType = cfg.BootstrapType
+
+	if cmds.AgentConfig.FlannelIface != "" && cmds.AgentConfig.NodeIP == "" {
+		cmds.AgentConfig.NodeIP = netutil.GetIPFromInterface(cmds.AgentConfig.FlannelIface)
+	}
+
+	if serverConfig.ControlConfig.AdvertiseIP == "" && cmds.AgentConfig.NodeIP != "" {
+		serverConfig.ControlConfig.AdvertiseIP = cmds.AgentConfig.NodeIP
+	}
+	if serverConfig.ControlConfig.AdvertiseIP != "" {
+		serverConfig.TLSConfig.KnownIPs = append(serverConfig.TLSConfig.KnownIPs, serverConfig.ControlConfig.AdvertiseIP)
+	}
 
 	_, serverConfig.ControlConfig.ClusterIPRange, err = net2.ParseCIDR(cfg.ClusterCIDR)
 	if err != nil {
@@ -110,6 +148,12 @@ func run(app *cli.Context, cfg *cmds.Server) error {
 	if err != nil {
 		return errors.Wrapf(err, "Invalid CIDR %s: %v", cfg.ServiceCIDR, err)
 	}
+
+	_, apiServerServiceIP, err := master.DefaultServiceIPRange(*serverConfig.ControlConfig.ServiceIPRange)
+	if err != nil {
+		return err
+	}
+	serverConfig.TLSConfig.KnownIPs = append(serverConfig.TLSConfig.KnownIPs, apiServerServiceIP.String())
 
 	// If cluster-dns CLI arg is not set, we set ClusterDNS address to be ServiceCIDR network + 10,
 	// i.e. when you set service-cidr to 192.168.0.0/16 and don't provide cluster-dns, it will be set to 192.168.0.10
@@ -121,8 +165,9 @@ func run(app *cli.Context, cfg *cmds.Server) error {
 		serverConfig.ControlConfig.ClusterDNS = net2.ParseIP(cfg.ClusterDNS)
 	}
 
-	// TODO: support etcd
-	serverConfig.ControlConfig.NoLeaderElect = true
+	if serverConfig.ControlConfig.StorageBackend != "etcd3" {
+		serverConfig.ControlConfig.NoLeaderElect = true
+	}
 
 	for _, noDeploy := range app.StringSlice("no-deploy") {
 		if noDeploy == "servicelb" {
@@ -140,7 +185,7 @@ func run(app *cli.Context, cfg *cmds.Server) error {
 	notifySocket := os.Getenv("NOTIFY_SOCKET")
 	os.Unsetenv("NOTIFY_SOCKET")
 
-	ctx := signal.SigTermCancelContext(context.Background())
+	ctx := signals.SetupSignalHandler(context.Background())
 	certs, err := server.StartServer(ctx, &serverConfig)
 	if err != nil {
 		return err
@@ -149,7 +194,7 @@ func run(app *cli.Context, cfg *cmds.Server) error {
 	logrus.Info("k3s is up and running")
 	if notifySocket != "" {
 		os.Setenv("NOTIFY_SOCKET", notifySocket)
-		systemd.SdNotify(true, "READY=1")
+		systemd.SdNotify(true, "READY=1\n")
 	}
 
 	if cfg.DisableAgent {
@@ -168,6 +213,7 @@ func run(app *cli.Context, cfg *cmds.Server) error {
 	agentConfig.DataDir = filepath.Dir(serverConfig.ControlConfig.DataDir)
 	agentConfig.ServerURL = url
 	agentConfig.Token = token
+	agentConfig.Labels = append(agentConfig.Labels, "node-role.kubernetes.io/master=true")
 
 	return agent.Run(ctx, agentConfig)
 }
@@ -179,4 +225,13 @@ func knownIPs(ips []string) []string {
 		ips = append(ips, ip.String())
 	}
 	return ips
+}
+
+func checkUnixTimestamp() error {
+	timeNow := time.Now()
+	// check if time before 01/01/1980
+	if timeNow.Before(time.Unix(315532800, 0)) {
+		return fmt.Errorf("server time isn't set properly: %v", timeNow)
+	}
+	return nil
 }

@@ -9,9 +9,9 @@ import:
 - package: github.com/MakeNowJust/heredoc
   version: bb23615498cded5e105af4ce27de75b089cbe851
 - package: github.com/Microsoft/go-winio
-  version: v0.4.11
+  version: v0.4.12
 - package: github.com/Microsoft/hcsshim
-  version: v0.8.3
+  version: v0.8.6
 - package: github.com/alexflint/go-filemutex
   version: 72bdc8eae2aef913234599b837f5dda445ca9bd9
 - package: github.com/armon/circbuf
@@ -33,12 +33,12 @@ import:
 - package: github.com/containerd/console
   version: c12b1e7919c14469339a5d38f2f8ed9b64a9de23
 - package: github.com/containerd/containerd
-  version: v1.2.6-k3s1
-  repo: https://github.com/ibuildthecloud/containerd
+  version: v1.2.7-k3s1
+  repo: https://github.com/rancher/containerd
 - package: github.com/containerd/continuity
   version: bd77b46c8352f74eb12c85bdc01f4b90f69d66b4
 - package: github.com/containerd/cri
-  version: v1.2-k3s.2
+  version: v1.2.7-k3s1
   repo: https://github.com/rancher/cri.git
 - package: github.com/containerd/fifo
   version: 3d5202aec260678c48179c56f40e6f38a095738c
@@ -47,14 +47,14 @@ import:
 - package: github.com/containerd/go-runc
   version: 5a6d9f37cfa36b15efba46dc7ea349fa9b7143c3
 - package: github.com/containerd/ttrpc
-  version: 2a805f71863501300ae1976d29f0454ae003e85a
+  version: f82148331ad2181edea8f3f649a1f7add6c3f9c2
 - package: github.com/containerd/typeurl
   version: a93fcdb778cd272c6e9b3028b2f42d813e785d40
 - package: github.com/containernetworking/cni
   version: v0.6.0
 - package: github.com/containernetworking/plugins
-  version: 9810b7d5137b171c4e07ce59bb18be9feccec557
-  repo: https://github.com/ibuildthecloud/plugins.git
+  version: v0.7.5-k3s1
+  repo: https://github.com/rancher/plugins.git
 - package: github.com/coreos/etcd
   version: v3.3.10
 - package: github.com/coreos/flannel
@@ -63,9 +63,9 @@ import:
 - package: github.com/coreos/go-iptables
   version: 47f22b0dd3355c0ba570ba12b0b8a36bf214c04b
 - package: github.com/coreos/go-semver
-  version: v0.2.0-9-ge214231b295a8e
+  version: v0.3.0
 - package: github.com/coreos/go-systemd
-  version: 48702e0da86bd25e76cfef347e2adeb434a0d0a6
+  version: v14
 - package: github.com/coreos/pkg
   version: v4
 - package: github.com/cyphar/filepath-securejoin
@@ -95,7 +95,7 @@ import:
 - package: github.com/euank/go-kmsg-parser
   version: v2.0.0
 - package: github.com/evanphx/json-patch
-  version: v4.1.0-19-g5858425f75500d
+  version: v4.2.0
 - package: github.com/exponent-io/jsonpath
   version: d6023ce2651d8eafb5c75bb0c7167536102ec9f5
 - package: github.com/fatih/camelcase
@@ -104,8 +104,10 @@ import:
   version: v1.3.1-1-gf12c6236fe7b5c
 - package: github.com/ghodss/yaml
   version: v1.0.0
+- package: github.com/go-sql-driver/mysql
+  version: v1.4.1
 - package: github.com/godbus/dbus
-  version: c7fdd8b5cd55e87b4e1f4e372cdb1db61dd6c66f
+  version: v3
 - package: github.com/gogo/googleapis
   version: 08a7655d27152912db7aaf4f983275eaf8d128ef
 - package: github.com/gogo/protobuf
@@ -132,7 +134,7 @@ import:
 - package: github.com/gregjones/httpcache
   version: 787624de3eb7bd915c329cba748687a3b22666a6
 - package: github.com/grpc-ecosystem/go-grpc-prometheus
-  version: 6b7015e65d366bf3f19b2b2a000a831940f0f7e0
+  version: v1.1
 - package: github.com/hashicorp/errwrap
   version: 7554cd9344cec97297fa6649b055a8c98c2a1e55
 - package: github.com/hashicorp/go-multierror
@@ -140,7 +142,8 @@ import:
 - package: github.com/hashicorp/golang-lru
   version: v0.5.0
 - package: github.com/ibuildthecloud/kvsql
-  version: 0e798b1475327aadf3b8da5d2d1f99bb93dfd667
+  version: 9f00ccc82235f0433c736306d091abd2939b7449
+  repo: https://github.com/erikwilson/rancher-kvsql.git
 - package: github.com/imdario/mergo
   version: v0.3.5
 - package: github.com/inconshreveable/mousetrap
@@ -156,12 +159,17 @@ import:
 - package: github.com/karrick/godirwalk
   version: v1.7.5
 - package: github.com/kubernetes-sigs/cri-tools
-  version: c465773e3ad8c941d1756c0a467d550b04a8f65b
-  repo: https://github.com/ibuildthecloud/cri-tools.git
+  version: v1.14.0-k3s1
+  repo: https://github.com/rancher/cri-tools.git
+- package: github.com/lib/pq
+  version: v1.1.1
 - package: github.com/liggitt/tabwriter
   version: 89fcab3d43de07060e4fd4c1547430ed57e87f24
 - package: github.com/lithammer/dedent
   version: v1.1.0
+- package: github.com/matryer/moq
+  version: ee5226d43009
+  repo: https://github.com/rancher/moq.git
 - package: github.com/mattn/go-shellwords
   version: v1.0.3-20-gf8471b0a71ded0
 - package: github.com/mattn/go-sqlite3
@@ -195,13 +203,13 @@ import:
 - package: github.com/opencontainers/image-spec
   version: v1.0.1
 - package: github.com/opencontainers/runc
-  version: 69ae5da6afdcaaf38285a10b36f362e41cb298d6
+  version: v1.0.0-rc8
 - package: github.com/opencontainers/runtime-spec
   version: 5684b8af48c1ac3b1451fa499724e30e3c20a294
 - package: github.com/opencontainers/runtime-tools
   version: v0.6.0
 - package: github.com/opencontainers/selinux
-  version: v1.2.1
+  version: v1.2.2
 - package: github.com/pborman/uuid
   version: ca53cad383cad2479bbba7f7a1a05797ec1386e4
 - package: github.com/peterbourgon/diskv
@@ -216,13 +224,22 @@ import:
   version: v0.2.0
 - package: github.com/prometheus/procfs
   version: 65c1f6f8f0fc1e2185eb9863a3bc751496404259
-- package: github.com/rancher/norman
-  version: 50017efee23caa79542ef685b65a7b783e0a73ca
-  repo: https://github.com/ibuildthecloud/norman.git
+- package: github.com/rancher/dynamiclistener
+  version: c08b499d17195fbc2c1764b21c322951811629a5
+  repo: https://github.com/erikwilson/rancher-dynamiclistener.git
+- package: github.com/rancher/helm-controller
+  version: v0.2.1
+- package: github.com/rancher/remotedialer
+  version: 7c71ffa8f5d7a181704d92bb8a33b0c7d07dccaa
+  repo: https://github.com/erikwilson/rancher-remotedialer.git
+- package: github.com/rancher/wrangler
+  version: 7737c167e16514a38229bc64c839cee8cd14e6d3
+- package: github.com/rancher/wrangler-api
+  version: v0.1.4
 - package: github.com/robfig/cron
   version: v1-53-gdf38d32658d878
 - package: github.com/rootless-containers/rootlesskit
-  version: 893c1c3de71f54c301fdb85a7c0dd15c1933c159
+  version: v0.4.1
 - package: github.com/russross/blackfriday
   version: v1.4-2-g300106c228d52c
 - package: github.com/seccomp/libseccomp-golang
@@ -259,6 +276,8 @@ import:
   version: 1d523034197ff1f222f6429836dd36a2457a1874
 - package: go.etcd.io/bbolt
   version: v1.3.1-etcd.8
+- package: go.etcd.io/etcd
+  version: v3.3.11
 - package: golang.org/x/crypto
   version: a49355c7e3f8fe157a85be2f77e6e269a0f89602
 - package: golang.org/x/net
@@ -295,7 +314,7 @@ import:
 - package: k8s.io/klog
   version: v0.2.0-14-g8e90cee79f8237
 - package: k8s.io/kubernetes
-  version: v1.14.1-k3s.4
+  version: v1.14.4-k3s.1
   repo: https://github.com/rancher/k3s.git
   transitive: true
   staging: true

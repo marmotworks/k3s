@@ -1,7 +1,7 @@
 version: '3'
 services:
   server:
-    image: rancher/k3s:v0.4.0
+    image: rancher/k3s:v0.7.0
     command: server --disable-agent
     environment:
     - K3S_CLUSTER_SECRET=somethingtotallyrandom
@@ -15,13 +15,11 @@ services:
     - 6443:6443
 
   node:
-    image: rancher/k3s:v0.4.0
+    image: rancher/k3s:v0.7.0
     tmpfs:
     - /run
     - /var/run
     privileged: true
-    depends_on:
-    - server
     environment:
     - K3S_URL=https://server:6443
     - K3S_CLUSTER_SECRET=somethingtotallyrandom

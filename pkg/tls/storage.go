@@ -3,11 +3,11 @@ package tls
 import (
 	"context"
 
-	v1 "github.com/rancher/k3s/types/apis/k3s.cattle.io/v1"
-	"github.com/rancher/norman/pkg/dynamiclistener"
+	"github.com/rancher/dynamiclistener"
+	v1 "github.com/rancher/k3s/pkg/apis/k3s.cattle.io/v1"
+	k3sclient "github.com/rancher/k3s/pkg/generated/controllers/k3s.cattle.io/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 )
 
 const (
@@ -15,23 +15,32 @@ const (
 	name = "tls-config"
 )
 
-func NewServer(ctx context.Context, listenerClient v1.ListenerConfigClient, config dynamiclistener.UserConfig) (dynamiclistener.ServerInterface, error) {
+func NewServer(ctx context.Context, listenerConfigs k3sclient.ListenerConfigController, config dynamiclistener.UserConfig) (dynamiclistener.ServerInterface, error) {
 	storage := &listenerConfigStorage{
-		client: listenerClient,
-		cache:  listenerClient.Cache(),
+		client: listenerConfigs,
+		cache:  listenerConfigs.Cache(),
+		config: config,
 	}
 
 	server, err := dynamiclistener.NewServer(storage, config)
-	listenerClient.OnChange(ctx, "listen-config", func(obj *v1.ListenerConfig) (runtime.Object, error) {
-		return obj, server.Update(fromStorage(obj))
+	if err != nil {
+		return nil, err
+	}
+
+	listenerConfigs.OnChange(ctx, "listen-config", func(key string, obj *v1.ListenerConfig) (*v1.ListenerConfig, error) {
+		if obj == nil {
+			return nil, nil
+		}
+		return obj, server.Update(storage.fromStorage(obj))
 	})
 
 	return server, err
 }
 
 type listenerConfigStorage struct {
-	cache  v1.ListenerConfigClientCache
-	client v1.ListenerConfigClient
+	cache  k3sclient.ListenerConfigCache
+	client k3sclient.ListenerConfigClient
+	config dynamiclistener.UserConfig
 }
 
 func (l *listenerConfigStorage) Set(config *dynamiclistener.ListenerStatus) (*dynamiclistener.ListenerStatus, error) {
@@ -46,7 +55,7 @@ func (l *listenerConfigStorage) Set(config *dynamiclistener.ListenerStatus) (*dy
 		})
 
 		ls, err := l.client.Create(ls)
-		return fromStorage(ls), err
+		return l.fromStorage(ls), err
 	} else if err != nil {
 		return nil, err
 	}
@@ -56,8 +65,13 @@ func (l *listenerConfigStorage) Set(config *dynamiclistener.ListenerStatus) (*dy
 	obj.Status = *config
 	obj.Status.Revision = ""
 
+	if l.config.CACerts != "" && l.config.CAKey != "" {
+		obj.Status.CACert = ""
+		obj.Status.CAKey = ""
+	}
+
 	obj, err = l.client.Update(obj)
-	return fromStorage(obj), err
+	return l.fromStorage(obj), err
 }
 
 func (l *listenerConfigStorage) Get() (*dynamiclistener.ListenerStatus, error) {
@@ -65,15 +79,24 @@ func (l *listenerConfigStorage) Get() (*dynamiclistener.ListenerStatus, error) {
 	if errors.IsNotFound(err) {
 		obj, err = l.client.Get(ns, name, metav1.GetOptions{})
 	}
-	return fromStorage(obj), err
+	if errors.IsNotFound(err) {
+		return &dynamiclistener.ListenerStatus{}, nil
+	}
+	return l.fromStorage(obj), err
 }
 
-func fromStorage(obj *v1.ListenerConfig) *dynamiclistener.ListenerStatus {
+func (l *listenerConfigStorage) fromStorage(obj *v1.ListenerConfig) *dynamiclistener.ListenerStatus {
 	if obj == nil {
 		return nil
 	}
 
 	copy := obj.DeepCopy()
 	copy.Status.Revision = obj.ResourceVersion
+
+	if l.config.CACerts != "" && l.config.CAKey != "" {
+		copy.Status.CACert = l.config.CACerts
+		copy.Status.CAKey = l.config.CAKey
+	}
+
 	return &copy.Status
 }

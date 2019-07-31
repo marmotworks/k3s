@@ -27,8 +27,8 @@ func main() {
 		cmds.NewServerCommand(wrap("k3s-server", os.Args)),
 		cmds.NewAgentCommand(wrap("k3s-agent", os.Args)),
 		cmds.NewKubectlCommand(externalCLIAction("kubectl")),
-		//cmds.NewCtrCommand(externalCLIAction("ctr")),
 		cmds.NewCRICTL(externalCLIAction("crictl")),
+		cmds.NewCtrCommand(externalCLIAction("ctr")),
 	}
 
 	err := app.Run(os.Args)
@@ -84,7 +84,7 @@ func stageAndRun(dataDir string, cmd string, args []string) error {
 		return errors.Wrap(err, "extracting data")
 	}
 
-	if err := os.Setenv("PATH", filepath.Join(dir, "bin")+":"+os.Getenv("PATH")); err != nil {
+	if err := os.Setenv("PATH", filepath.Join(dir, "bin")+":"+os.Getenv("PATH")+":"+filepath.Join(dir, "bin/aux")); err != nil {
 		return err
 	}
 
